@@ -52,7 +52,8 @@ public final class SyncEngine {
 
             DispatchQueue.main.async {
                 if let hb { self.heartbeat = hb }
-                for item in changes { self.store.upsert(item) }
+                // Batch all upserts into a single observable update
+                self.store.batchUpsert(changes)
                 if !confirmedIds.isEmpty {
                     self.commands?.confirmDelivery(confirmedIds)
                 }

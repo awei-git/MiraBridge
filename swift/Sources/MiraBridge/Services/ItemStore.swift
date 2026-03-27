@@ -55,6 +55,12 @@ public final class ItemStore {
             .sorted { $0.date > $1.date }
     }
 
+    private static let groupByDayFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "M月d日"
+        return df
+    }()
+
     /// Group items by day for display
     public var groupedByDay: [(key: String, items: [MiraItem])] {
         let cal = Calendar.current
@@ -68,9 +74,7 @@ public final class ItemStore {
             } else if cal.isDateInYesterday(item.date) {
                 key = "昨天"
             } else {
-                let df = DateFormatter()
-                df.dateFormat = "M月d日"
-                key = df.string(from: item.date)
+                key = Self.groupByDayFormatter.string(from: item.date)
             }
             groups[key, default: []].append(item)
         }
@@ -118,12 +122,33 @@ public final class ItemStore {
             items.append(item)
             itemsById[item.id] = items.count - 1
         }
+        scheduleCacheSave()
+    }
+
+    /// Batch upsert: apply all changes to a local copy, then assign once
+    /// so @Observable fires a single update instead of one per item.
+    public func batchUpsert(_ newItems: [MiraItem]) {
+        guard !newItems.isEmpty else { return }
+        var updated = items
+        var index = itemsById
+        for item in newItems {
+            if let idx = index[item.id] {
+                updated[idx] = item
+            } else {
+                index[item.id] = updated.count
+                updated.append(item)
+            }
+        }
+        items = updated
+        itemsById = index
+        scheduleCacheSave()
     }
 
     public func remove(_ id: String) {
         if let idx = itemsById[id] {
             items.remove(at: idx)
             rebuildIndex()
+            scheduleCacheSave()
         }
     }
 
@@ -136,6 +161,7 @@ public final class ItemStore {
         guard let idx = itemsById[itemId] else { return }
         items[idx].messages.append(message)
         items[idx].updatedAt = message.timestamp
+        scheduleCacheSave()
     }
 
     private func rebuildIndex() {
@@ -147,20 +173,57 @@ public final class ItemStore {
 
     // MARK: - Local Cache
 
+    private static let cacheQueue = DispatchQueue(label: "com.mira.itemstore.cache", qos: .utility)
+    private var pendingSave: DispatchWorkItem?
+    private static let saveDebounceSec: TimeInterval = 2.0
+
     private var cacheURL: URL? {
         try? FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
                                       appropriateFor: nil, create: true)
             .appending(path: "items_cache.json")
     }
 
-    public func saveToCache() {
-        guard let url = cacheURL else { return }
-        do {
-            let data = try JSONEncoder().encode(items)
-            try data.write(to: url, options: .atomic)
-        } catch { }
+    /// Schedule a debounced cache write. Resets the timer on each call so
+    /// rapid mutations coalesce into a single disk write after 2 s of quiet.
+    private func scheduleCacheSave() {
+        pendingSave?.cancel()
+        // Snapshot the current items array on the calling (main) thread
+        let snapshot = items
+        let url = cacheURL
+        let work = DispatchWorkItem { [url] in
+            guard let url else { return }
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                #if DEBUG
+                print("[ItemStore] cache write failed: \(error)")
+                #endif
+            }
+        }
+        pendingSave = work
+        Self.cacheQueue.asyncAfter(deadline: .now() + Self.saveDebounceSec, execute: work)
     }
 
+    /// Write cache immediately (e.g. when app is about to background).
+    public func saveToCache() {
+        pendingSave?.cancel()
+        guard let url = cacheURL else { return }
+        let snapshot = items
+        Self.cacheQueue.async {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                #if DEBUG
+                print("[ItemStore] cache write failed: \(error)")
+                #endif
+            }
+        }
+    }
+
+    /// Synchronously load cached items. Call once on launch before
+    /// the sync engine starts so the UI has data immediately.
     public func loadFromCache() {
         guard let url = cacheURL,
               let data = try? Data(contentsOf: url),
