@@ -120,7 +120,7 @@ public struct MiraHeartbeat: Codable {
     }
 
     public var isRecent: Bool {
-        Date().timeIntervalSince(date) < 180
+        Date().timeIntervalSince(date) < 600
     }
 
     public var isBusy: Bool { busy ?? false }
