@@ -393,7 +393,8 @@ class Bridge:
     # Heartbeat
     # ==================================================================
 
-    def heartbeat(self, busy: bool = False, active_count: int = 0):
+    def heartbeat(self, busy: bool = False, active_count: int = 0,
+                  agent_status: dict | None = None):
         """Write heartbeat so mobile app knows agent is alive."""
         data = {
             "timestamp": _utc_iso(),
@@ -401,6 +402,8 @@ class Bridge:
             "busy": busy,
             "active_count": active_count,
         }
+        if agent_status:
+            data["agent_status"] = agent_status
         _atomic_write(self.heartbeat_file, data)
 
     # ==================================================================
