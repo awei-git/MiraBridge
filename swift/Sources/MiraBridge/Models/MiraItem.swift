@@ -57,6 +57,12 @@ public struct ItemMessage: Codable, Identifiable, Equatable {
     public let content: String
     public let timestamp: String
     public var kind: MessageKind
+    public var imagePath: String?  // relative to iCloud MtJoy/Mira-Artifacts/{user}/ container
+
+    enum CodingKeys: String, CodingKey {
+        case id, sender, content, timestamp, kind
+        case imagePath = "image_path"
+    }
 
     public var date: Date {
         ISO8601DateFormatter.flexibleDate(from: timestamp) ?? .distantPast
