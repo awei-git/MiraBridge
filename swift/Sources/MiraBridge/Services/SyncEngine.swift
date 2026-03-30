@@ -39,13 +39,19 @@ public final class SyncEngine {
         timer = nil
     }
 
-    public func refresh() {
-        guard config.isSetup, !syncing else { return }
+    public func refresh(completion: (() -> Void)? = nil) {
+        guard config.isSetup, !syncing else {
+            completion?()
+            return
+        }
         syncing = true
 
         // All file I/O on background thread to avoid blocking UI
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
             let hb = self._loadHeartbeatBG()
             let changes = self._loadManifestAndDiffBG()
             let confirmedIds = self._loadLedgerBG()
@@ -63,6 +69,7 @@ public final class SyncEngine {
                 if let t = self.timer, t.timeInterval != desiredInterval {
                     self.startPolling()
                 }
+                completion?()
             }
         }
     }
