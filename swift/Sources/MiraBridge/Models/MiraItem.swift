@@ -27,6 +27,55 @@ public struct MiraItem: Codable, Identifiable, Equatable {
         case updatedAt = "updated_at"
         case messages, error
         case resultPath = "result_path"
+        // Legacy key used by older agent code for origin
+        case sender
+    }
+
+    public init(id: String, type: ItemType, title: String, status: ItemStatus,
+                tags: [String], origin: ItemOrigin, pinned: Bool, quick: Bool,
+                parentId: String? = nil, createdAt: String, updatedAt: String,
+                messages: [ItemMessage], error: ItemError? = nil, resultPath: String? = nil) {
+        self.id = id; self.type = type; self.title = title; self.status = status
+        self.tags = tags; self.origin = origin; self.pinned = pinned; self.quick = quick
+        self.parentId = parentId; self.createdAt = createdAt; self.updatedAt = updatedAt
+        self.messages = messages; self.error = error; self.resultPath = resultPath
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        type = (try? c.decode(ItemType.self, forKey: .type)) ?? .feed
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        status = (try? c.decode(ItemStatus.self, forKey: .status)) ?? .done
+        tags = (try? c.decode([String].self, forKey: .tags)) ?? []
+        origin = (try? c.decode(ItemOrigin.self, forKey: .origin))
+            ?? ((try? c.decode(String.self, forKey: .sender)).map { $0 == "user" ? .user : .agent } ?? .agent)
+        pinned = (try? c.decode(Bool.self, forKey: .pinned)) ?? false
+        quick = (try? c.decode(Bool.self, forKey: .quick)) ?? false
+        parentId = try? c.decodeIfPresent(String.self, forKey: .parentId)
+        createdAt = (try? c.decode(String.self, forKey: .createdAt)) ?? ""
+        updatedAt = (try? c.decode(String.self, forKey: .updatedAt)) ?? ""
+        messages = (try? c.decode([ItemMessage].self, forKey: .messages)) ?? []
+        error = try? c.decodeIfPresent(ItemError.self, forKey: .error)
+        resultPath = try? c.decodeIfPresent(String.self, forKey: .resultPath)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(type, forKey: .type)
+        try c.encode(title, forKey: .title)
+        try c.encode(status, forKey: .status)
+        try c.encode(tags, forKey: .tags)
+        try c.encode(origin, forKey: .origin)
+        try c.encode(pinned, forKey: .pinned)
+        try c.encode(quick, forKey: .quick)
+        try c.encodeIfPresent(parentId, forKey: .parentId)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encode(messages, forKey: .messages)
+        try c.encodeIfPresent(error, forKey: .error)
+        try c.encodeIfPresent(resultPath, forKey: .resultPath)
     }
 }
 
@@ -62,6 +111,37 @@ public struct ItemMessage: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, sender, content, timestamp, kind
         case imagePath = "image_path"
+        // Legacy key from older agent code
+        case role
+    }
+
+    public init(id: String, sender: String, content: String, timestamp: String,
+                kind: MessageKind = .text, imagePath: String? = nil) {
+        self.id = id; self.sender = sender; self.content = content
+        self.timestamp = timestamp; self.kind = kind; self.imagePath = imagePath
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString.prefix(8).lowercased()
+        // Accept "sender" or fall back to "role" (legacy agent format)
+        sender = (try? c.decode(String.self, forKey: .sender))
+            ?? (try? c.decode(String.self, forKey: .role))
+            ?? "agent"
+        content = (try? c.decode(String.self, forKey: .content)) ?? ""
+        timestamp = (try? c.decode(String.self, forKey: .timestamp)) ?? ISO8601DateFormatter.shared.string(from: Date())
+        kind = (try? c.decode(MessageKind.self, forKey: .kind)) ?? .text
+        imagePath = try? c.decodeIfPresent(String.self, forKey: .imagePath)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(sender, forKey: .sender)
+        try c.encode(content, forKey: .content)
+        try c.encode(timestamp, forKey: .timestamp)
+        try c.encode(kind, forKey: .kind)
+        try c.encodeIfPresent(imagePath, forKey: .imagePath)
     }
 
     public var date: Date {
