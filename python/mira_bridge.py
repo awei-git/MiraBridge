@@ -548,27 +548,68 @@ class Bridge:
     # ==================================================================
 
     def archive_done_items(self, days: int = 7):
-        """Move done/failed items older than N days to archive/."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        """Archive stale items to keep the feed clean.
+
+        Rules:
+        - done/failed/completed older than `days` -> archive
+        - queued older than `days` -> archive (stuck tasks)
+        - working older than `days * 2` -> archive (dead tasks)
+        - needs-input with no user reply older than 1 day -> archive
+        - Corrupt JSON files older than 1 day -> delete
+        - Pinned items are never archived.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=days)
+        stuck_cutoff = now - timedelta(days=days * 2)
+        stale_cutoff = now - timedelta(days=1)
         changed = False
         for path in list(self.items_dir.glob("*.json")):
             try:
                 item = json.loads(path.read_text(encoding="utf-8"))
-                if item.get("status") not in ("done", "failed"):
-                    continue
+            except (json.JSONDecodeError, OSError):
+                # Corrupt file — remove if old enough
+                try:
+                    if path.stat().st_mtime < stale_cutoff.timestamp():
+                        path.unlink()
+                        changed = True
+                except OSError:
+                    pass
+                continue
+            try:
                 if item.get("pinned"):
                     continue
                 updated = datetime.fromisoformat(
                     item["updated_at"].replace("Z", "+00:00"))
-                if updated < cutoff:
+                status = item.get("status")
+
+                should_archive = False
+                if status in ("done", "failed", "completed") and updated < cutoff:
+                    should_archive = True
+                elif status == "queued" and updated < cutoff:
+                    should_archive = True
+                elif status == "working" and updated < stuck_cutoff:
+                    should_archive = True
+                elif status == "needs-input" and updated < stale_cutoff:
+                    has_user_reply = any(
+                        m.get("sender") == "user"
+                        for m in item.get("messages", [])
+                    )
+                    if not has_user_reply:
+                        should_archive = True
+
+                if should_archive:
                     item["status"] = "archived"
                     _atomic_write(self.archive_dir / path.name, item)
                     path.unlink()
                     changed = True
-            except (json.JSONDecodeError, OSError, KeyError):
+            except KeyError:
                 continue
         if changed:
             self._update_manifest()
+
+    def cleanup_old(self, days: int = 7):
+        """Alias for archive_done_items (called by super agent)."""
+        self.archive_done_items(days=days)
 
     # ==================================================================
     # Manifest

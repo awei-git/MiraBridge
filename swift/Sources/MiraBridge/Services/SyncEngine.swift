@@ -53,13 +53,21 @@ public final class SyncEngine {
                 return
             }
             let hb = self._loadHeartbeatBG()
-            let changes = self._loadManifestAndDiffBG()
+            let (changes, manifestIds) = self._loadManifestAndDiffBG()
             let confirmedIds = self._loadLedgerBG()
 
             DispatchQueue.main.async {
                 if let hb { self.heartbeat = hb }
                 // Batch all upserts into a single observable update
                 self.store.batchUpsert(changes)
+                // Remove items not in manifest (stale cache entries)
+                if !manifestIds.isEmpty {
+                    let staleIds = self.store.items.map(\.id)
+                        .filter { !manifestIds.contains($0) }
+                    for id in staleIds {
+                        self.store.remove(id)
+                    }
+                }
                 if !confirmedIds.isEmpty {
                     self.commands?.confirmDelivery(confirmedIds)
                 }
@@ -82,8 +90,8 @@ public final class SyncEngine {
         return try? decoder.decode(MiraHeartbeat.self, from: data)
     }
 
-    private func _loadManifestAndDiffBG() -> [MiraItem] {
-        guard let url = config.manifestURL else { return [] }
+    private func _loadManifestAndDiffBG() -> ([MiraItem], Set<String>) {
+        guard let url = config.manifestURL else { return ([], []) }
         let fm = FileManager.default
         if let userDir = config.bridgeURL?.appending(path: "users") {
             try? fm.startDownloadingUbiquitousItem(at: userDir)
@@ -94,7 +102,7 @@ public final class SyncEngine {
         try? fm.startDownloadingUbiquitousItem(at: url)
 
         guard let data = try? Data(contentsOf: url),
-              let manifest = try? decoder.decode(MiraManifest.self, from: data) else { return [] }
+              let manifest = try? decoder.decode(MiraManifest.self, from: data) else { return ([], []) }
 
         var changed: [MiraItem] = []
         var currentIds = Set<String>()
@@ -113,13 +121,13 @@ public final class SyncEngine {
             }
         }
 
-        // Remove items no longer in manifest (on main thread via caller)
+        // Clean up stale manifest timestamps
         let removedIds = Set(manifestTimestamps.keys).subtracting(currentIds)
         for id in removedIds {
             manifestTimestamps.removeValue(forKey: id)
         }
 
-        return changed
+        return (changed, currentIds)
     }
 
     private func _loadLedgerBG() -> Set<String> {

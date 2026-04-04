@@ -11,16 +11,16 @@ If you're building a local AI agent that runs on your Mac and want to control it
 ## Architecture
 
 ```
-┌─────────────┐     iCloud Drive      ┌─────────────┐
-│  Mac Agent   │ ←──── files ────────→ │  iPhone App  │
-│  (Python)    │                       │  (SwiftUI)   │
-│              │                       │              │
-│  Bridge()    │    ~/Library/Mobile   │ SyncEngine   │
-│  .heartbeat  │    Documents/iCloud/  │ ItemStore    │
-│  .poll       │    MyApp-Bridge/      │ CommandWriter│
-│  .create     │                       │ BridgeConfig │
-│  .update     │                       │              │
-└─────────────┘                        └─────────────┘
++-------------+     iCloud Drive      +-------------+
+|  Mac Agent  | <----- files -------> |  iPhone App  |
+|  (Python)   |                       |  (SwiftUI)   |
+|             |                       |              |
+|  Bridge()   |    ~/Library/Mobile   | SyncEngine   |
+|  .heartbeat |    Documents/iCloud/  | ItemStore    |
+|  .poll      |    MyApp-Bridge/      | CommandWriter|
+|  .create    |                       | BridgeConfig |
+|  .update    |                       |              |
++-------------+                       +-------------+
 ```
 
 ## Quick Start
@@ -87,21 +87,25 @@ for item in store.activeRequests { ... }
 
 ```
 MyApp-Bridge/
-├── heartbeat.json              ← Agent writes every ~30s
-├── profiles.json               ← User registry (optional)
+├── heartbeat.json              <- Agent writes every ~30s
+├── profiles.json               <- User registry (optional)
 ├── users/
 │   └── {user_id}/
-│       ├── manifest.json       ← Index of all items (agent-owned)
-│       ├── items/              ← One JSON file per item (agent-owned)
+│       ├── manifest.json       <- Index of all items (agent-owned)
+│       ├── items/              <- One JSON file per item (agent-owned)
 │       │   ├── req_001.json
 │       │   ├── feed_daily.json
 │       │   └── disc_chat.json
-│       ├── commands/           ← iOS writes, agent reads + deletes
+│       ├── commands/           <- iOS writes, agent reads + deletes
 │       │   └── cmd_20260326_120000_abc123.json
-│       ├── command_ledger.json ← Reliable delivery tracking
-│       ├── todos.json          ← Shared todo list
-│       └── archive/            ← Old items moved here
-└── shared/                     ← Cross-user items (optional)
+│       ├── command_ledger.json <- Reliable delivery tracking
+│       ├── todos.json          <- Shared todo list
+│       ├── health/
+│       │   ├── health_summary.json  <- Agent writes metrics + trends
+│       │   ├── apple_health_export.json  <- iOS writes (background)
+│       │   └── checkups/       <- iOS writes checkup photos
+│       └── archive/            <- Old items moved here
+└── shared/                     <- Cross-user items (optional)
     └── items/
 ```
 
@@ -134,7 +138,9 @@ MyApp-Bridge/
 }
 ```
 
-### Command Schema (iOS → Agent)
+Note: The Swift decoder is fault-tolerant -- missing `pinned`, `quick`, or `origin` fields get defaults. The `sender` field in messages also accepts the legacy `role` key.
+
+### Command Schema (iOS -> Agent)
 
 ```json
 {
@@ -146,6 +152,29 @@ MyApp-Bridge/
   "content": "Details here",
   "item_id": "req_001",
   "tags": ["urgent"]
+}
+```
+
+### Health Summary (Agent -> iOS)
+
+```json
+{
+  "person_id": "ang",
+  "updated_at": "2026-03-30T14:00:00Z",
+  "latest": {
+    "weight": {"value": 72.5, "unit": "kg", "date": "2026-03-30"},
+    "hrv": {"value": 46.0, "unit": "ms", "date": "2026-03-30"}
+  },
+  "trends": {
+    "weight": [{"value": 72.5, "date": "2026-03-01"}, ...],
+    "sleep_hours": [...]
+  },
+  "stats_7d": {
+    "weight": {"avg": 72.3, "min": 71.8, "max": 72.8, "count": 7}
+  },
+  "notes": [
+    {"date": "2026-03-30", "category": "symptom", "content": "headache"}
+  ]
 }
 ```
 
@@ -176,13 +205,16 @@ Commands use a two-phase protocol:
 If the agent crashes between steps 2 and 3, the ledger prevents re-processing on restart. If it crashes before step 2, the command file is still there and will be picked up next cycle.
 
 ### Manifest for Efficient Sync
-The iOS app doesn't scan every item file on each poll. Instead, it reads `manifest.json` (a lightweight index), compares timestamps with its local cache, and only fetches items that changed. The manifest includes a `generation` counter for CAS (compare-and-swap) operations.
+The iOS app doesn't scan every item file on each poll. Instead, it reads `manifest.json` (a lightweight index), compares timestamps with its local cache, and only fetches items that changed.
+
+### Fault-Tolerant Decoding
+The Swift models use custom `init(from:)` decoders that provide defaults for missing fields. This prevents a single malformed item from breaking the entire sync. Legacy field names (e.g., `role` instead of `sender`) are accepted via fallback keys.
 
 ### iCloud Placeholder Handling
 iCloud Drive may show a file as present but only download it on demand (cloud placeholder). The Python side uses `brctl download` to force downloads. The Swift side uses `startDownloadingUbiquitousItem()`. Both sides have retry logic for files that aren't immediately available.
 
 ### Multi-User Support
-Each user gets their own namespace under `users/{user_id}/`. A single agent can serve multiple users by iterating `Bridge.for_all_users()`. Items can be shared across users via `bridge.share_item()`.
+Each user gets their own namespace under `users/{user_id}/`. A single agent can serve multiple users by iterating `Bridge.for_all_users()`.
 
 ## Requirements
 
