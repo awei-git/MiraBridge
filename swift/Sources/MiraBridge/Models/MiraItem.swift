@@ -276,7 +276,7 @@ extension MiraItem {
     }
 
     public var needsAttention: Bool {
-        status == .needsInput
+        status == .needsInput && !messages.contains(where: { $0.sender == "user" })
     }
 
     public var lastMessage: ItemMessage? {
