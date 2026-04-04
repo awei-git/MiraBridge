@@ -561,7 +561,7 @@ class Bridge:
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=days)
         stuck_cutoff = now - timedelta(days=days * 2)
-        stale_cutoff = now - timedelta(days=1)
+        stale_cutoff = now - timedelta(hours=12)
         changed = False
         for path in list(self.items_dir.glob("*.json")):
             try:
