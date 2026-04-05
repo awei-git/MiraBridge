@@ -165,6 +165,30 @@ public final class SyncEngine {
     }
 
     private func _loadManifestAndDiffBG() -> ([MiraItem], Set<String>, MiraManifest?) {
+        let userId = config.profile?.id ?? "ang"
+        let serverBase = config.serverURL ?? BridgeConfig.defaultServerURL
+
+        // --- Try LAN first: fetch manifest + changed items via HTTP ---
+        if let manifest = _fetchJSON(MiraManifest.self, from: serverBase.appending(path: "api/\(userId)/manifest")) {
+            var changed: [MiraItem] = []
+            var currentIds = Set<String>()
+
+            for entry in manifest.items {
+                currentIds.insert(entry.id)
+                if manifestTimestamps[entry.id] == entry.updatedAt { continue }
+                manifestTimestamps[entry.id] = entry.updatedAt
+
+                // Fetch changed item via LAN
+                if let item = _fetchJSON(MiraItem.self, from: serverBase.appending(path: "api/\(userId)/items/\(entry.id)")) {
+                    changed.append(item)
+                }
+            }
+            let removedIds = Set(manifestTimestamps.keys).subtracting(currentIds)
+            for id in removedIds { manifestTimestamps.removeValue(forKey: id) }
+            return (changed, currentIds, manifest)
+        }
+
+        // --- Fallback: iCloud files ---
         guard let url = config.manifestURL else { return ([], [], nil) }
         let fm = FileManager.default
         if let userDir = config.bridgeURL?.appending(path: "users") {
@@ -195,12 +219,8 @@ public final class SyncEngine {
             }
         }
 
-        // Clean up stale manifest timestamps
         let removedIds = Set(manifestTimestamps.keys).subtracting(currentIds)
-        for id in removedIds {
-            manifestTimestamps.removeValue(forKey: id)
-        }
-
+        for id in removedIds { manifestTimestamps.removeValue(forKey: id) }
         return (changed, currentIds, manifest)
     }
 
@@ -213,4 +233,20 @@ public final class SyncEngine {
     }
 
     public var debugLog: String = ""
+
+    /// Synchronous HTTP fetch with 3s timeout, returns decoded object or nil
+    private func _fetchJSON<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
+        var request = URLRequest(url: url, timeoutInterval: 3)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let sem = DispatchSemaphore(value: 0)
+        var result: T?
+        URLSession.shared.dataTask(with: request) { [weak self] data, resp, _ in
+            defer { sem.signal() }
+            guard let data,
+                  let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return }
+            result = try? self?.decoder.decode(T.self, from: data)
+        }.resume()
+        sem.wait()
+        return result
+    }
 }
