@@ -13,6 +13,9 @@ public final class SyncEngine {
     public var syncing: Bool = false
 
     private var timer: Timer?
+    private var fastPollCount: Int = 0
+    private static let fastPollMax = 10      // fast-poll up to 10 times (30s)
+    private static let fastPollInterval: TimeInterval = 3
     private var manifestTimestamps: [String: String] = [:]  // id → updated_at
     private let decoder = JSONDecoder()
 
@@ -25,13 +28,29 @@ public final class SyncEngine {
 
     public func startPolling() {
         timer?.invalidate()
-        let interval: TimeInterval = store.hasActiveItems ? 20 : 60
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor [weak self] in self?.refresh() }
-        }
-        // First refresh async so UI renders immediately
+        // Fast-poll for first 30s after app opens to get fresh heartbeat quickly
+        fastPollCount = 0
+        _scheduleNextPoll()
+        // First refresh immediately
         Task { @MainActor [weak self] in self?.refresh() }
+    }
+
+    private func _scheduleNextPoll() {
+        timer?.invalidate()
+        let interval: TimeInterval
+        if !agentOnline && fastPollCount < Self.fastPollMax {
+            interval = Self.fastPollInterval
+        } else {
+            interval = store.hasActiveItems ? 20 : 60
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if !self.agentOnline { self.fastPollCount += 1 }
+                self.refresh()
+            }
+        }
     }
 
     public func stopPolling() {
@@ -72,11 +91,7 @@ public final class SyncEngine {
                     self.commands?.confirmDelivery(confirmedIds)
                 }
                 self.syncing = false
-
-                let desiredInterval: TimeInterval = self.store.hasActiveItems ? 20 : 60
-                if let t = self.timer, t.timeInterval != desiredInterval {
-                    self.startPolling()
-                }
+                self._scheduleNextPoll()
                 completion?()
             }
         }
@@ -85,8 +100,16 @@ public final class SyncEngine {
     // Background-safe versions (no @MainActor)
     private func _loadHeartbeatBG() -> MiraHeartbeat? {
         guard let url = config.heartbeatURL else { return nil }
+        // Trigger iCloud download
         try? FileManager.default.startDownloadingUbiquitousItem(at: url)
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        // Coordinated read to get latest iCloud version (not stale cache)
+        var data: Data?
+        var coordinatorError: NSError?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatorError) { readURL in
+            data = try? Data(contentsOf: readURL)
+        }
+        guard let data else { return nil }
         return try? decoder.decode(MiraHeartbeat.self, from: data)
     }
 
