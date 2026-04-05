@@ -100,16 +100,24 @@ public final class SyncEngine {
     // Background-safe versions (no @MainActor)
     private func _loadHeartbeatBG() -> MiraHeartbeat? {
         guard let url = config.heartbeatURL else { return nil }
-        // Trigger iCloud download
-        try? FileManager.default.startDownloadingUbiquitousItem(at: url)
-        // Coordinated read to get latest iCloud version (not stale cache)
-        var data: Data?
-        var coordinatorError: NSError?
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatorError) { readURL in
-            data = try? Data(contentsOf: readURL)
+        let fm = FileManager.default
+
+        // Evict local cache to force iCloud to fetch latest version
+        try? fm.evictUbiquitousItem(at: url)
+
+        // Trigger download of latest version from iCloud
+        try? fm.startDownloadingUbiquitousItem(at: url)
+
+        // Wait for file to be downloaded (up to 2 seconds)
+        for _ in 0..<20 {
+            if let vals = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]),
+               vals.ubiquitousItemDownloadingStatus == .current {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.1)
         }
-        guard let data else { return nil }
+
+        guard let data = try? Data(contentsOf: url) else { return nil }
         return try? decoder.decode(MiraHeartbeat.self, from: data)
     }
 
