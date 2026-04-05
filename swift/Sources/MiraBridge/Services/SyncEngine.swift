@@ -10,9 +10,8 @@ public final class SyncEngine {
 
     public var heartbeat: MiraHeartbeat?
     public var lastManifest: MiraManifest?
-    /// Agent is online if manifest was updated within 10 minutes
-    /// (manifest syncs reliably via iCloud; heartbeat.json does not)
-    public var agentOnline: Bool { lastManifest?.isRecent ?? false }
+    /// Agent is online if heartbeat OR manifest is recent
+    public var agentOnline: Bool { heartbeat?.isRecent ?? lastManifest?.isRecent ?? false }
     public var syncing: Bool = false
     public var heartbeatDebug: String = "waiting..."
 
