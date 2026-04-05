@@ -15,6 +15,14 @@ public final class BridgeConfig {
     public var isProfileSelected: Bool { profile != nil }
     public var agentName: String { profile?.agentName ?? "Mira" }
 
+    /// LAN server URL for direct heartbeat (bypasses iCloud sync delay)
+    public var serverURL: URL? {
+        get { UserDefaults.standard.url(forKey: "mira_server_url") }
+        set { UserDefaults.standard.set(newValue, forKey: "mira_server_url") }
+    }
+    /// Default: Mac Studio on local network (use IP — .local mDNS unreliable on iOS)
+    public static let defaultServerURL = URL(string: "http://192.168.1.232:8384")!
+
     // Per-user computed URLs
     private var userDir: URL? {
         guard let base = bridgeURL, let p = profile else { return nil }

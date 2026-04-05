@@ -217,10 +217,20 @@ public struct MiraHeartbeat: Codable {
 public struct MiraManifest: Codable {
     public let updatedAt: String
     public let items: [ManifestEntry]
+    public var generation: Int?
 
     enum CodingKeys: String, CodingKey {
         case updatedAt = "updated_at"
-        case items
+        case items, generation
+    }
+
+    /// Use manifest updated_at as heartbeat — manifest syncs reliably via iCloud
+    public var date: Date {
+        ISO8601DateFormatter.flexibleDate(from: updatedAt) ?? .distantPast
+    }
+
+    public var isRecent: Bool {
+        Date().timeIntervalSince(date) < 600
     }
 }
 

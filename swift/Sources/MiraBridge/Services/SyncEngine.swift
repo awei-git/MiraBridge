@@ -9,8 +9,12 @@ public final class SyncEngine {
     public weak var commands: CommandWriter?
 
     public var heartbeat: MiraHeartbeat?
-    public var agentOnline: Bool { heartbeat?.isRecent ?? false }
+    public var lastManifest: MiraManifest?
+    /// Agent is online if manifest was updated within 10 minutes
+    /// (manifest syncs reliably via iCloud; heartbeat.json does not)
+    public var agentOnline: Bool { lastManifest?.isRecent ?? false }
     public var syncing: Bool = false
+    public var heartbeatDebug: String = "waiting..."
 
     private var timer: Timer?
     private var fastPollCount: Int = 0
@@ -18,6 +22,7 @@ public final class SyncEngine {
     private static let fastPollInterval: TimeInterval = 3
     private var manifestTimestamps: [String: String] = [:]  // id → updated_at
     private let decoder = JSONDecoder()
+    private var metadataQuery: NSMetadataQuery?
 
     public init(config: BridgeConfig, store: ItemStore) {
         self.config = config
@@ -31,8 +36,25 @@ public final class SyncEngine {
         // Fast-poll for first 30s after app opens to get fresh heartbeat quickly
         fastPollCount = 0
         _scheduleNextPoll()
+        _startHeartbeatMonitor()
         // First refresh immediately
         Task { @MainActor [weak self] in self?.refresh() }
+    }
+
+    /// Watch heartbeat.json via NSMetadataQuery — gets notified when iCloud updates the file
+    private func _startHeartbeatMonitor() {
+        guard metadataQuery == nil, let url = config.heartbeatURL else { return }
+        let q = NSMetadataQuery()
+        q.predicate = NSPredicate(format: "%K == %@", NSMetadataItemPathKey, url.path)
+        q.searchScopes = [NSMetadataQueryUbiquitousDataScope, NSMetadataQueryUbiquitousDocumentsScope]
+        NotificationCenter.default.addObserver(
+            forName: .NSMetadataQueryDidUpdate, object: q, queue: .main
+        ) { [weak self] _ in
+            // iCloud updated the heartbeat file — refresh immediately
+            self?.refresh()
+        }
+        q.start()
+        metadataQuery = q
     }
 
     private func _scheduleNextPoll() {
@@ -60,6 +82,8 @@ public final class SyncEngine {
 
     public func refresh(completion: (() -> Void)? = nil) {
         guard config.isSetup, !syncing else {
+            if !config.isSetup { debugLog = "bridge not configured" }
+            else if syncing { debugLog = "sync in progress" }
             completion?()
             return
         }
@@ -72,11 +96,12 @@ public final class SyncEngine {
                 return
             }
             let hb = self._loadHeartbeatBG()
-            let (changes, manifestIds) = self._loadManifestAndDiffBG()
+            let (changes, manifestIds, manifest) = self._loadManifestAndDiffBG()
             let confirmedIds = self._loadLedgerBG()
 
             DispatchQueue.main.async {
                 if let hb { self.heartbeat = hb }
+                if let manifest { self.lastManifest = manifest }
                 // Batch all upserts into a single observable update
                 self.store.batchUpsert(changes)
                 // Remove items not in manifest (stale cache entries)
@@ -99,30 +124,49 @@ public final class SyncEngine {
 
     // Background-safe versions (no @MainActor)
     private func _loadHeartbeatBG() -> MiraHeartbeat? {
-        guard let url = config.heartbeatURL else { return nil }
-        let fm = FileManager.default
+        // Strategy: try LAN HTTP first (instant), fall back to iCloud file (may be stale)
 
-        // Evict local cache to force iCloud to fetch latest version
-        try? fm.evictUbiquitousItem(at: url)
+        // 1. Try LAN server
+        let serverBase = config.serverURL ?? BridgeConfig.defaultServerURL
+        let apiURL = serverBase.appending(path: "api/heartbeat")
+        var request = URLRequest(url: apiURL, timeoutInterval: 3)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
 
-        // Trigger download of latest version from iCloud
-        try? fm.startDownloadingUbiquitousItem(at: url)
-
-        // Wait for file to be downloaded (up to 2 seconds)
-        for _ in 0..<20 {
-            if let vals = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]),
-               vals.ubiquitousItemDownloadingStatus == .current {
-                break
+        let sem = DispatchSemaphore(value: 0)
+        var lanHB: MiraHeartbeat?
+        var lanSource = "lan"
+        URLSession.shared.dataTask(with: request) { [weak self] data, resp, err in
+            defer { sem.signal() }
+            guard let data,
+                  let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let hb = try? self?.decoder.decode(MiraHeartbeat.self, from: data) else {
+                return
             }
-            Thread.sleep(forTimeInterval: 0.1)
+            lanHB = hb
+        }.resume()
+        sem.wait()
+
+        if let hb = lanHB {
+            let age = Int(Date().timeIntervalSince(hb.date))
+            DispatchQueue.main.async { self.debugLog = "LAN age=\(age)s (\(serverBase.host() ?? "?"))" }
+            return hb
         }
 
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? decoder.decode(MiraHeartbeat.self, from: data)
+        // 2. Fall back to iCloud file
+        guard let url = config.heartbeatURL else { return nil }
+        try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+        guard let data = try? Data(contentsOf: url),
+              let hb = try? decoder.decode(MiraHeartbeat.self, from: data) else {
+            DispatchQueue.main.async { self.debugLog = "LAN unreachable, iCloud read failed" }
+            return nil
+        }
+        let age = Int(Date().timeIntervalSince(hb.date))
+        DispatchQueue.main.async { self.debugLog = "iCloud fallback age=\(age)s" }
+        return hb
     }
 
-    private func _loadManifestAndDiffBG() -> ([MiraItem], Set<String>) {
-        guard let url = config.manifestURL else { return ([], []) }
+    private func _loadManifestAndDiffBG() -> ([MiraItem], Set<String>, MiraManifest?) {
+        guard let url = config.manifestURL else { return ([], [], nil) }
         let fm = FileManager.default
         if let userDir = config.bridgeURL?.appending(path: "users") {
             try? fm.startDownloadingUbiquitousItem(at: userDir)
@@ -133,7 +177,7 @@ public final class SyncEngine {
         try? fm.startDownloadingUbiquitousItem(at: url)
 
         guard let data = try? Data(contentsOf: url),
-              let manifest = try? decoder.decode(MiraManifest.self, from: data) else { return ([], []) }
+              let manifest = try? decoder.decode(MiraManifest.self, from: data) else { return ([], [], nil) }
 
         var changed: [MiraItem] = []
         var currentIds = Set<String>()
@@ -158,7 +202,7 @@ public final class SyncEngine {
             manifestTimestamps.removeValue(forKey: id)
         }
 
-        return (changed, currentIds)
+        return (changed, currentIds, manifest)
     }
 
     private func _loadLedgerBG() -> Set<String> {
