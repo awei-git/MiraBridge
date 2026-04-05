@@ -1,12 +1,12 @@
 # MiraBridge
 
-A zero-infrastructure communication layer between a local agent (Python on Mac) and a mobile app (SwiftUI on iPhone) using iCloud Drive as the message bus.
+A zero-infrastructure communication layer between a local agent (Python on Mac) and a mobile app (SwiftUI on iPhone) using iCloud Drive as the canonical message bus.
 
-No servers. No APIs. No accounts. Just files synced by iCloud.
+No always-on backend is required. Just files synced by iCloud. An optional local HTTP mirror can sit on top for faster reads, but the file protocol remains the source of truth.
 
 ## Why?
 
-If you're building a local AI agent that runs on your Mac and want to control it from your phone, you normally need a server, authentication, push notifications, etc. MiraBridge replaces all of that with a shared folder on iCloud Drive. Your agent writes files; your phone reads them. Your phone writes commands; your agent reads them. iCloud handles the sync.
+If you're building a local AI agent that runs on your Mac and want to control it from your phone, you normally need a server, authentication, push notifications, etc. MiraBridge replaces the required backend with a shared folder on iCloud Drive. Your agent writes files; your phone reads them. Your phone writes commands; your agent reads them. iCloud handles the sync. If you later add a trusted local HTTP mirror, the app can read heartbeat and changed items faster without changing the write protocol.
 
 ## Architecture
 
@@ -23,6 +23,12 @@ If you're building a local AI agent that runs on your Mac and want to control it
 +-------------+                       +-------------+
 ```
 
+Optional read acceleration:
+
+```
+iPhone App -- HTTP GET --> Local mirror (heartbeat / manifest / item reads only)
+```
+
 ## Quick Start
 
 ### Python (Agent Side)
@@ -32,7 +38,7 @@ from mira_bridge import Bridge
 
 # Point to a folder inside iCloud Drive
 bridge = Bridge("~/Library/Mobile Documents/com~apple~CloudDocs/MyApp/Bridge",
-                user_id="default")
+                user_id="ang")
 
 # Tell the phone you're alive
 bridge.heartbeat()
@@ -46,7 +52,7 @@ for cmd in bridge.poll_commands():
         # ... do work ...
 
         bridge.update_status(item_id, "done",
-                            agent_message="Here's your result!")
+                             agent_message="Here's your result!")
 
 # Push a notification to the phone
 bridge.create_feed("update_001", "Status Update", "Processing complete.")
@@ -139,6 +145,16 @@ MyApp-Bridge/
 ```
 
 Note: The Swift decoder is fault-tolerant -- missing `pinned`, `quick`, or `origin` fields get defaults. The `sender` field in messages also accepts the legacy `role` key.
+
+## Optional HTTP Mirror
+
+Some apps use a local HTTP mirror for lower-latency reads when the Mac and phone are on the same network. The common read endpoints are:
+
+- `GET /api/heartbeat`
+- `GET /api/{user_id}/manifest`
+- `GET /api/{user_id}/items/{item_id}`
+
+This mirror is optional and read-through only. Commands, ledgers, manifests, and item ownership still live in the file protocol above. In the Mira repo, this mirror is implemented in `web/server.py` and is limited to known users.
 
 ### Command Schema (iOS -> Agent)
 
