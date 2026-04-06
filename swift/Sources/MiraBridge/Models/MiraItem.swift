@@ -273,6 +273,10 @@ public struct MiraCommand: Codable {
 // MARK: - Computed Properties
 
 extension MiraItem {
+    public var allowsReply: Bool {
+        status != .archived && type != .feed
+    }
+
     public var date: Date {
         ISO8601DateFormatter.flexibleDate(from: updatedAt) ?? .distantPast
     }
