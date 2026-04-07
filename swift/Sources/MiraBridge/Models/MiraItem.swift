@@ -274,7 +274,7 @@ public struct MiraCommand: Codable {
 
 extension MiraItem {
     public var allowsReply: Bool {
-        status != .archived && type != .feed
+        status != .archived
     }
 
     public var date: Date {
