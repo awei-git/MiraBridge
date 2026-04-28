@@ -40,16 +40,22 @@ public final class SyncEngine {
         Task { @MainActor [weak self] in self?.refresh() }
     }
 
-    /// Watch heartbeat.json via NSMetadataQuery — gets notified when iCloud updates the file
+    /// Watch heartbeat.json AND manifest.json via NSMetadataQuery — refresh
+    /// the moment iCloud delivers a change to either file, instead of waiting
+    /// for the next polling tick. Pre-2026-04-27: only heartbeat was watched,
+    /// so item-list changes had to wait up to 60s for the timer.
     private func _startHeartbeatMonitor() {
-        guard metadataQuery == nil, let url = config.heartbeatURL else { return }
+        guard metadataQuery == nil else { return }
+        var paths: [String] = []
+        if let hb = config.heartbeatURL { paths.append(hb.path) }
+        if let mf = config.manifestURL { paths.append(mf.path) }
+        guard !paths.isEmpty else { return }
         let q = NSMetadataQuery()
-        q.predicate = NSPredicate(format: "%K == %@", NSMetadataItemPathKey, url.path)
+        q.predicate = NSPredicate(format: "%K IN %@", NSMetadataItemPathKey, paths)
         q.searchScopes = [NSMetadataQueryUbiquitousDataScope, NSMetadataQueryUbiquitousDocumentsScope]
         NotificationCenter.default.addObserver(
             forName: .NSMetadataQueryDidUpdate, object: q, queue: .main
         ) { [weak self] _ in
-            // iCloud updated the heartbeat file — refresh immediately
             self?.refresh()
         }
         q.start()

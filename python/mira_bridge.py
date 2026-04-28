@@ -179,11 +179,13 @@ class Bridge:
         return item
 
     def create_feed(self, feed_id: str, title: str, content: str,
-                    tags: list[str] | None = None) -> dict:
+                    tags: list[str] | None = None, pinned: bool = False) -> dict:
         """Create a feed item (briefing, journal, notification). Auto-completed."""
         item = self.create_item(feed_id, "feed", title, content,
                                 sender="agent", tags=tags, origin="agent")
         item["status"] = "done"
+        if pinned:
+            item["pinned"] = True
         self._write_item(item)
         self._update_manifest(item)
         return item
@@ -269,13 +271,28 @@ class Bridge:
         self._update_manifest(item)
 
     def emit_status_card(self, item_id: str, text: str, icon: str = "gear"):
-        """Emit a status card message (progress indicator)."""
-        self.append_message(
-            item_id, "agent",
-            json.dumps({"type": "status", "text": text, "icon": icon},
-                       ensure_ascii=False),
-            kind="status_card",
-        )
+        """Emit a status card. Replaces the most recent status_card from
+        agent so the thread shows ONE live indicator instead of a stack of
+        'Still working... (1m/2m/3m elapsed)' messages."""
+        item = self._read_item(item_id)
+        if not item:
+            return
+        msgs = item.get("messages", [])
+        # Trim trailing agent status_cards (one or many) so only this latest
+        # one remains. Preserves user messages and prior text replies.
+        while msgs and msgs[-1].get("kind") == "status_card" and msgs[-1].get("sender") == "agent":
+            msgs.pop()
+        msgs.append({
+            "id": _msg_id(),
+            "sender": "agent",
+            "content": json.dumps({"type": "status", "text": text, "icon": icon}, ensure_ascii=False),
+            "timestamp": _utc_iso(),
+            "kind": "status_card",
+        })
+        item["messages"] = msgs
+        item["updated_at"] = _utc_iso()
+        self._write_item(item)
+        self._update_manifest(item)
 
     def set_tags(self, item_id: str, tags: list[str]):
         """Update item tags."""
@@ -283,6 +300,16 @@ class Bridge:
         if not item:
             return
         item["tags"] = tags
+        item["updated_at"] = _utc_iso()
+        self._write_item(item)
+        self._update_manifest(item)
+
+    def set_pinned(self, item_id: str, pinned: bool):
+        """Pin or unpin an item."""
+        item = self._read_item(item_id)
+        if not item:
+            return
+        item["pinned"] = pinned
         item["updated_at"] = _utc_iso()
         self._write_item(item)
         self._update_manifest(item)
