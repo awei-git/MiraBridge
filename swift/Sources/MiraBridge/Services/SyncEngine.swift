@@ -150,7 +150,7 @@ public final class SyncEngine {
 
         let sem = DispatchSemaphore(value: 0)
         var lanHB: MiraHeartbeat?
-        MiraPinnedURLSession.shared.dataTask(with: request) { [weak self] data, resp, err in
+        let heartbeatTask = MiraPinnedURLSession.shared.dataTask(with: request) { [weak self] data, resp, err in
             defer { sem.signal() }
             var failure = err?.localizedDescription ?? "no response"
             if let http = resp as? HTTPURLResponse { failure = "HTTP \(http.statusCode)" }
@@ -168,8 +168,11 @@ public final class SyncEngine {
                 return
             }
             lanHB = hb
-        }.resume()
-        sem.wait()
+        }
+        heartbeatTask.resume()
+        if sem.wait(timeout: .now() + 3.5) == .timedOut {
+            heartbeatTask.cancel()
+        }
 
         if let hb = lanHB {
             let age = Int(Date().timeIntervalSince(hb.date))
@@ -361,7 +364,7 @@ public final class SyncEngine {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         let sem = DispatchSemaphore(value: 0)
         var result: T?
-        MiraPinnedURLSession.shared.dataTask(with: request) { [weak self] data, resp, _ in
+        let task = MiraPinnedURLSession.shared.dataTask(with: request) { [weak self] data, resp, _ in
             defer { sem.signal() }
             guard let data,
                   let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return }
@@ -372,8 +375,11 @@ public final class SyncEngine {
                 }
             }
             result = decoded
-        }.resume()
-        sem.wait()
+        }
+        task.resume()
+        if sem.wait(timeout: .now() + 3.5) == .timedOut {
+            task.cancel()
+        }
         return result
     }
 }

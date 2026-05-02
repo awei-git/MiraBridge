@@ -53,8 +53,11 @@ public final class BridgeConfig {
     }
 
     public init() {
+        profiles = Self.defaultProfiles
         restoreBookmark()
         restoreProfile()
+        loadProfilesAsync()
+        ensureDirectoriesAsync()
     }
 
     public func startServerDiscovery() {
@@ -121,8 +124,8 @@ public final class BridgeConfig {
             debugInfo = "Selected: \(url.lastPathComponent) → bridge: \(actualBridge.lastPathComponent)"
             // Delay profile loading slightly to let iCloud download
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.loadProfiles()
-                self?.ensureDirectories()
+                self?.loadProfilesAsync()
+                self?.ensureDirectoriesAsync()
             }
         } catch {
             self.error = "Cannot save bookmark for \(url.lastPathComponent): \(error.localizedDescription)"
@@ -134,7 +137,7 @@ public final class BridgeConfig {
     public func selectProfile(_ p: MiraProfile) {
         profile = p
         UserDefaults.standard.set(p.id, forKey: "selected_profile")
-        ensureDirectories()
+        ensureDirectoriesAsync()
     }
 
     private static let defaultProfiles: [MiraProfile] = [
@@ -154,6 +157,29 @@ public final class BridgeConfig {
             profiles = decoded.profiles.isEmpty ? Self.defaultProfiles : decoded.profiles
         } catch {
             profiles = Self.defaultProfiles
+        }
+    }
+
+    public func loadProfilesAsync() {
+        guard let url = bridgeURL?.appending(path: "profiles.json") else {
+            profiles = Self.defaultProfiles
+            restoreProfile()
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+            let decodedProfiles: [MiraProfile]
+            if let data = try? Data(contentsOf: url),
+               let decoded = try? JSONDecoder().decode(MiraProfiles.self, from: data),
+               !decoded.profiles.isEmpty {
+                decodedProfiles = decoded.profiles
+            } else {
+                decodedProfiles = Self.defaultProfiles
+            }
+            DispatchQueue.main.async {
+                self?.profiles = decodedProfiles
+                self?.restoreProfile()
+            }
         }
     }
 
@@ -194,16 +220,6 @@ public final class BridgeConfig {
                 rootURL = url
                 bridgeURL = url.appending(path: "Mira-Bridge")
             }
-            // Trigger iCloud downloads
-            let fm = FileManager.default
-            if let b = bridgeURL {
-                try? fm.startDownloadingUbiquitousItem(at: b)
-                try? fm.startDownloadingUbiquitousItem(at: b.appending(path: "heartbeat.json"))
-                try? fm.startDownloadingUbiquitousItem(at: b.appending(path: "profiles.json"))
-                try? fm.startDownloadingUbiquitousItem(at: b.appending(path: "users"))
-            }
-            loadProfiles()
-            ensureDirectories()
         } catch {
             // Stale bookmark — silently clear, user will re-select folder
             UserDefaults.standard.removeObject(forKey: "bridge_bookmark")
@@ -220,6 +236,26 @@ public final class BridgeConfig {
         }
         if let hb = heartbeatURL { try? fm.startDownloadingUbiquitousItem(at: hb) }
         if let mf = manifestURL { try? fm.startDownloadingUbiquitousItem(at: mf) }
+    }
+
+    private func ensureDirectoriesAsync() {
+        guard let bridgeURL, let dir = userDir else { return }
+        let hb = heartbeatURL
+        let mf = manifestURL
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            try? fm.startDownloadingUbiquitousItem(at: bridgeURL)
+            try? fm.startDownloadingUbiquitousItem(at: bridgeURL.appending(path: "heartbeat.json"))
+            try? fm.startDownloadingUbiquitousItem(at: bridgeURL.appending(path: "profiles.json"))
+            try? fm.startDownloadingUbiquitousItem(at: bridgeURL.appending(path: "users"))
+            for sub in ["items", "commands", "archive"] {
+                let d = dir.appending(path: sub)
+                try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+                try? fm.startDownloadingUbiquitousItem(at: d)
+            }
+            if let hb { try? fm.startDownloadingUbiquitousItem(at: hb) }
+            if let mf { try? fm.startDownloadingUbiquitousItem(at: mf) }
+        }
     }
 }
 
