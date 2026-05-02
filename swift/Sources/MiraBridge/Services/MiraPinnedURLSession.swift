@@ -24,6 +24,10 @@ public final class MiraPinnedURLSession: NSObject, URLSessionDelegate {
         try await session.data(from: url)
     }
 
+    public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await session.data(for: request)
+    }
+
     public func bytes(for request: URLRequest) async throws -> (URLSession.AsyncBytes, URLResponse) {
         try await session.bytes(for: request)
     }
