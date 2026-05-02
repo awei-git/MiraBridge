@@ -84,7 +84,7 @@ public enum ItemType: String, Codable {
 }
 
 public enum ItemStatus: String, Codable {
-    case queued, working
+    case queued, working, verifying
     case needsInput = "needs-input"
     case done, failed, archived
 }
@@ -246,6 +246,18 @@ public struct ManifestEntry: Codable {
     }
 }
 
+public struct MiraTasksResponse: Codable {
+    public let items: [MiraItem]
+    public let serverTime: String
+    public let lastEventId: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case items
+        case serverTime = "server_time"
+        case lastEventId = "last_event_id"
+    }
+}
+
 // MARK: - Commands (iOS → Agent)
 
 public struct MiraCommand: Codable {
@@ -286,7 +298,7 @@ extension MiraItem {
     }
 
     public var isActive: Bool {
-        [.queued, .working, .needsInput].contains(status)
+        [.queued, .working, .verifying, .needsInput].contains(status)
     }
 
     public var needsAttention: Bool {
@@ -309,6 +321,7 @@ extension MiraItem {
         switch status {
         case .queued: return "clock"
         case .working: return "circle.dotted.circle"
+        case .verifying: return "checkmark.seal"
         case .needsInput: return "exclamationmark.bubble"
         case .done: return "checkmark.circle"
         case .failed: return "xmark.circle"
@@ -320,6 +333,7 @@ extension MiraItem {
         switch status {
         case .queued: return "secondary"
         case .working: return "blue"
+        case .verifying: return "mint"
         case .needsInput: return "orange"
         case .done: return "green"
         case .failed: return "red"

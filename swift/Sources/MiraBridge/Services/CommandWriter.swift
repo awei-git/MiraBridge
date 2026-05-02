@@ -17,6 +17,7 @@ public final class CommandWriter {
 
     /// Track pending commands for delivery confirmation
     public var pendingIds: Set<String> = []
+    private let pendingAPIKey = "mira_pending_api_requests"
 
     public init(config: BridgeConfig, store: ItemStore? = nil) {
         self.config = config
@@ -38,36 +39,44 @@ public final class CommandWriter {
 
     public func createRequest(title: String, content: String, quick: Bool = false, tags: [String] = []) {
         let id = cmdId()
+        let itemId = "req_\(id)"
         let ts = now()
-        write(MiraCommand(
+        let command = MiraCommand(
             id: id, type: "new_request", timestamp: ts, sender: senderID,
-            title: title, content: content, tags: tags.isEmpty ? nil : tags, quick: quick
-        ))
+            title: title, content: content, itemId: itemId,
+            tags: tags.isEmpty ? nil : tags, quick: quick
+        )
         // Optimistic: show immediately
-        store?.upsert(MiraItem(
-            id: "req_\(id)", type: .request, title: title, status: .queued,
+        let item = MiraItem(
+            id: itemId, type: .request, title: title, status: .queued,
             tags: tags, origin: .user, pinned: false, quick: quick, parentId: nil,
             createdAt: ts, updatedAt: ts,
             messages: [ItemMessage(id: id, sender: senderID, content: content, timestamp: ts, kind: .text)],
             error: nil, resultPath: nil
-        ))
+        )
+        store?.upsert(item)
+        submitTask(command, itemType: .request)
     }
 
     public func createDiscussion(title: String, content: String, tags: [String] = []) {
         let id = cmdId()
+        let itemId = "disc_\(id)"
         let ts = now()
-        write(MiraCommand(
+        let command = MiraCommand(
             id: id, type: "new_discussion", timestamp: ts, sender: senderID,
-            title: title, content: content, tags: tags.isEmpty ? nil : tags
-        ))
+            title: title, content: content, itemId: itemId,
+            tags: tags.isEmpty ? nil : tags
+        )
         // Optimistic: show immediately
-        store?.upsert(MiraItem(
-            id: "disc_\(id)", type: .discussion, title: title, status: .queued,
+        let item = MiraItem(
+            id: itemId, type: .discussion, title: title, status: .queued,
             tags: tags, origin: .user, pinned: false, quick: false, parentId: nil,
             createdAt: ts, updatedAt: ts,
             messages: [ItemMessage(id: id, sender: senderID, content: content, timestamp: ts, kind: .text)],
             error: nil, resultPath: nil
-        ))
+        )
+        store?.upsert(item)
+        submitTask(command, itemType: .discussion)
     }
 
     public func comment(parentId: String, content: String) {
@@ -80,14 +89,15 @@ public final class CommandWriter {
     public func reply(to itemId: String, content: String) {
         let id = cmdId()
         let ts = now()
-        write(MiraCommand(
+        let command = MiraCommand(
             id: id, type: "reply", timestamp: ts, sender: senderID,
             content: content, itemId: itemId
-        ))
+        )
         // Optimistic: show reply immediately in local UI
         store?.appendMessage(to: itemId, message: ItemMessage(
             id: id, sender: senderID, content: content, timestamp: ts, kind: .text
         ))
+        submitReply(command)
     }
 
     public func todoFollowup(todoId: String, content: String) {
@@ -98,10 +108,11 @@ public final class CommandWriter {
     }
 
     public func cancel(itemId: String) {
-        write(MiraCommand(
+        let command = MiraCommand(
             id: cmdId(), type: "cancel", timestamp: now(), sender: senderID,
             itemId: itemId
-        ))
+        )
+        sendOrQueue(path: "tasks/\(itemId)/cancel", payload: EmptyPayload(), fallback: command)
     }
 
     public func recall(query: String) {
@@ -112,17 +123,19 @@ public final class CommandWriter {
     }
 
     public func archive(itemId: String) {
-        write(MiraCommand(
+        let command = MiraCommand(
             id: cmdId(), type: "archive", timestamp: now(), sender: senderID,
             itemId: itemId
-        ))
+        )
+        sendOrQueue(path: "tasks/\(itemId)/archive", payload: EmptyPayload(), fallback: command)
     }
 
     public func pin(itemId: String, pinned: Bool) {
-        write(MiraCommand(
+        let command = MiraCommand(
             id: cmdId(), type: "pin", timestamp: now(), sender: senderID,
             itemId: itemId, pinned: pinned
-        ))
+        )
+        sendOrQueue(path: "tasks/\(itemId)/pin", payload: PinPayload(pinned: pinned), fallback: command)
     }
 
     public func tag(itemId: String, tags: [String]) {
@@ -138,7 +151,139 @@ public final class CommandWriter {
         pendingIds.subtract(confirmedIds)
     }
 
+    public func flushPendingAPIQueue() {
+        var queue = loadPendingAPIRequests()
+        guard !queue.isEmpty else { return }
+        let request = queue.removeFirst()
+        postAPIData(path: request.path, body: request.body) { [weak self] ok in
+            guard let self else { return }
+            if ok {
+                self.savePendingAPIRequests(queue)
+                self.flushPendingAPIQueue()
+            }
+        }
+    }
+
     // MARK: - Internal
+
+    private struct TaskCreatePayload: Encodable {
+        let title: String
+        let content: String
+        let quick: Bool
+        let tags: [String]
+        let clientRequestId: String
+        let type: String
+
+        enum CodingKeys: String, CodingKey {
+            case title, content, quick, tags, type
+            case clientRequestId = "client_request_id"
+        }
+    }
+
+    private struct ReplyPayload: Encodable {
+        let content: String
+    }
+
+    private struct PinPayload: Encodable {
+        let pinned: Bool
+    }
+
+    private struct EmptyPayload: Encodable {}
+
+    private struct PendingAPIRequest: Codable {
+        let id: String
+        let path: String
+        let body: Data
+        let createdAt: String
+    }
+
+    private func submitTask(_ command: MiraCommand, itemType: ItemType) {
+        guard let title = command.title, let content = command.content else {
+            write(command)
+            return
+        }
+        let payload = TaskCreatePayload(
+            title: title,
+            content: content,
+            quick: command.quick ?? false,
+            tags: command.tags ?? [],
+            clientRequestId: command.id,
+            type: itemType.rawValue
+        )
+        sendOrQueue(path: "tasks", payload: payload, fallback: command)
+    }
+
+    private func submitReply(_ command: MiraCommand) {
+        guard let itemId = command.itemId, let content = command.content else {
+            write(command)
+            return
+        }
+        sendOrQueue(path: "tasks/\(itemId)/reply", payload: ReplyPayload(content: content), fallback: command)
+    }
+
+    private func sendOrQueue<T: Encodable>(path: String, payload: T, fallback command: MiraCommand) {
+        do {
+            let body = try JSONEncoder().encode(payload)
+            postAPIData(path: path, body: body) { [weak self] ok in
+                guard let self else { return }
+                if ok { return }
+                if self.config.apiWriteFallbackToICloud {
+                    self.write(command)
+                } else {
+                    self.enqueuePendingAPIRequest(path: path, body: body, id: command.id)
+                }
+            }
+        } catch {
+            write(command)
+        }
+    }
+
+    private func postAPIData(path: String, body: Data, completion: @escaping (Bool) -> Void) {
+        guard let userId = config.profile?.id else {
+            completion(false)
+            return
+        }
+        config.startServerDiscovery()
+        let base = config.serverURL ?? BridgeConfig.defaultServerURL
+        let url = base.appending(path: "api/\(userId)/\(path)")
+        var request = URLRequest(url: url, timeoutInterval: 3)
+        request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        MiraPinnedURLSession.shared.dataTask(with: request) { _, response, _ in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            completion((200..<300).contains(code))
+        }.resume()
+    }
+
+    private func enqueuePendingAPIRequest(path: String, body: Data, id: String) {
+        var queue = loadPendingAPIRequests()
+        if queue.contains(where: { $0.id == id }) { return }
+        queue.append(PendingAPIRequest(id: id, path: path, body: body, createdAt: now()))
+        savePendingAPIRequests(queue)
+        DispatchQueue.main.async { [weak self] in
+            self?.pendingIds.insert(id)
+        }
+    }
+
+    private func loadPendingAPIRequests() -> [PendingAPIRequest] {
+        guard let data = UserDefaults.standard.data(forKey: pendingAPIKey),
+              let queue = try? JSONDecoder().decode([PendingAPIRequest].self, from: data) else {
+            return []
+        }
+        return queue
+    }
+
+    private func savePendingAPIRequests(_ queue: [PendingAPIRequest]) {
+        if queue.isEmpty {
+            UserDefaults.standard.removeObject(forKey: pendingAPIKey)
+            return
+        }
+        if let data = try? JSONEncoder().encode(queue) {
+            UserDefaults.standard.set(data, forKey: pendingAPIKey)
+        }
+    }
 
     private func write(_ command: MiraCommand) {
         guard let dir = config.commandsDir else { return }
@@ -148,7 +293,9 @@ public final class CommandWriter {
         do {
             let data = try encoder.encode(command)
             try data.write(to: url, options: .atomic)
-            pendingIds.insert(command.id)
+            DispatchQueue.main.async { [weak self] in
+                self?.pendingIds.insert(command.id)
+            }
         } catch { }
     }
 

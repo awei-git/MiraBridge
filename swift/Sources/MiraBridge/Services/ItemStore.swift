@@ -1,5 +1,21 @@
 import Foundation
 import Observation
+import SwiftData
+
+@Model
+final class PersistedMiraItem {
+    @Attribute(.unique) var id: String
+    var updatedAt: String
+    var sortTimestamp: Date
+    @Attribute(.externalStorage) var payload: Data
+
+    init(id: String, updatedAt: String, sortTimestamp: Date, payload: Data) {
+        self.id = id
+        self.updatedAt = updatedAt
+        self.sortTimestamp = sortTimestamp
+        self.payload = payload
+    }
+}
 
 /// Single source of truth for all MiraItems in memory.
 /// Provides computed views by type, status, and tags.
@@ -7,8 +23,12 @@ import Observation
 public final class ItemStore {
     private(set) public var items: [MiraItem] = []
     private var itemsById: [String: Int] = [:]  // id → index in items array
+    @ObservationIgnored private var modelContainer: ModelContainer?
+    @ObservationIgnored private var modelContext: ModelContext?
 
-    public init() {}
+    public init() {
+        configureSwiftData()
+    }
 
     // MARK: - Computed Views
 
@@ -122,7 +142,7 @@ public final class ItemStore {
             items.append(item)
             itemsById[item.id] = items.count - 1
         }
-        scheduleCacheSave()
+        schedulePersistenceSave()
     }
 
     /// Batch upsert: apply all changes to a local copy, then assign once
@@ -141,14 +161,15 @@ public final class ItemStore {
         }
         items = updated
         itemsById = index
-        scheduleCacheSave()
+        schedulePersistenceSave()
     }
 
     public func remove(_ id: String) {
         if let idx = itemsById[id] {
             items.remove(at: idx)
             rebuildIndex()
-            scheduleCacheSave()
+            deletePersistedItem(id)
+            schedulePersistenceSave()
         }
     }
 
@@ -161,7 +182,7 @@ public final class ItemStore {
         guard let idx = itemsById[itemId] else { return }
         items[idx].messages.append(message)
         items[idx].updatedAt = message.timestamp
-        scheduleCacheSave()
+        schedulePersistenceSave()
     }
 
     private func rebuildIndex() {
@@ -171,64 +192,134 @@ public final class ItemStore {
         }
     }
 
-    // MARK: - Local Cache
+    // MARK: - Local Persistence
 
-    private static let cacheQueue = DispatchQueue(label: "com.mira.itemstore.cache", qos: .utility)
     private var pendingSave: DispatchWorkItem?
     private static let saveDebounceSec: TimeInterval = 2.0
 
-    private var cacheURL: URL? {
+    private var legacyCacheURL: URL? {
         try? FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
                                       appropriateFor: nil, create: true)
             .appending(path: "items_cache.json")
     }
 
-    /// Schedule a debounced cache write. Resets the timer on each call so
-    /// rapid mutations coalesce into a single disk write after 2 s of quiet.
-    private func scheduleCacheSave() {
+    private func configureSwiftData() {
+        do {
+            let schema = Schema([PersistedMiraItem.self])
+            let configuration = ModelConfiguration("MiraItems", schema: schema)
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            modelContainer = container
+            modelContext = ModelContext(container)
+        } catch {
+            modelContainer = nil
+            modelContext = nil
+            #if DEBUG
+            print("[ItemStore] SwiftData unavailable: \(error)")
+            #endif
+        }
+    }
+
+    /// Schedule a debounced SwiftData write. Resets the timer on each call so
+    /// rapid mutations coalesce into a single persistence pass after 2 s of quiet.
+    private func schedulePersistenceSave() {
         pendingSave?.cancel()
-        // Snapshot the current items array on the calling (main) thread
-        let snapshot = items
-        let url = cacheURL
-        let work = DispatchWorkItem { [url] in
-            guard let url else { return }
-            do {
-                let data = try JSONEncoder().encode(snapshot)
-                try data.write(to: url, options: .atomic)
-            } catch {
-                #if DEBUG
-                print("[ItemStore] cache write failed: \(error)")
-                #endif
-            }
+        let work = DispatchWorkItem { [weak self] in
+            self?.persistNow()
         }
         pendingSave = work
-        Self.cacheQueue.asyncAfter(deadline: .now() + Self.saveDebounceSec, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.saveDebounceSec, execute: work)
     }
 
-    /// Write cache immediately (e.g. when app is about to background).
+    /// Write SwiftData immediately (e.g. when app is about to background).
     public func saveToCache() {
         pendingSave?.cancel()
-        guard let url = cacheURL else { return }
-        let snapshot = items
-        Self.cacheQueue.async {
-            do {
-                let data = try JSONEncoder().encode(snapshot)
-                try data.write(to: url, options: .atomic)
-            } catch {
-                #if DEBUG
-                print("[ItemStore] cache write failed: \(error)")
-                #endif
-            }
+        persistNow()
+    }
+
+    /// Synchronously load persisted items. Call once on launch before
+    /// the sync engine starts so the UI has data immediately.
+    public func loadFromCache() {
+        if loadFromSwiftData() { return }
+        migrateLegacyJSONCache()
+    }
+
+    private func loadFromSwiftData() -> Bool {
+        guard let modelContext else { return false }
+        do {
+            let descriptor = FetchDescriptor<PersistedMiraItem>(
+                sortBy: [SortDescriptor(\.sortTimestamp, order: .reverse)]
+            )
+            let stored = try modelContext.fetch(descriptor)
+            let decoded = stored.compactMap { try? JSONDecoder().decode(MiraItem.self, from: $0.payload) }
+            guard !decoded.isEmpty else { return false }
+            items = decoded
+            rebuildIndex()
+            return true
+        } catch {
+            #if DEBUG
+            print("[ItemStore] SwiftData read failed: \(error)")
+            #endif
+            return false
         }
     }
 
-    /// Synchronously load cached items. Call once on launch before
-    /// the sync engine starts so the UI has data immediately.
-    public func loadFromCache() {
-        guard let url = cacheURL,
+    private func migrateLegacyJSONCache() {
+        guard let url = legacyCacheURL,
               let data = try? Data(contentsOf: url),
-              let cached = try? JSONDecoder().decode([MiraItem].self, from: data) else { return }
+              let cached = try? JSONDecoder().decode([MiraItem].self, from: data),
+              !cached.isEmpty else { return }
         items = cached
         rebuildIndex()
+        persistNow()
+    }
+
+    private func persistNow() {
+        guard let modelContext else { return }
+        do {
+            let stored = try modelContext.fetch(FetchDescriptor<PersistedMiraItem>())
+            var storedById = Dictionary(uniqueKeysWithValues: stored.map { ($0.id, $0) })
+            let encoder = JSONEncoder()
+
+            for item in items {
+                let data = try encoder.encode(item)
+                if let existing = storedById.removeValue(forKey: item.id) {
+                    existing.updatedAt = item.updatedAt
+                    existing.sortTimestamp = item.date
+                    existing.payload = data
+                } else {
+                    modelContext.insert(PersistedMiraItem(
+                        id: item.id,
+                        updatedAt: item.updatedAt,
+                        sortTimestamp: item.date,
+                        payload: data
+                    ))
+                }
+            }
+
+            for stale in storedById.values {
+                modelContext.delete(stale)
+            }
+            try modelContext.save()
+        } catch {
+            #if DEBUG
+            print("[ItemStore] SwiftData write failed: \(error)")
+            #endif
+        }
+    }
+
+    private func deletePersistedItem(_ id: String) {
+        guard let modelContext else { return }
+        do {
+            let descriptor = FetchDescriptor<PersistedMiraItem>(
+                predicate: #Predicate { $0.id == id }
+            )
+            for item in try modelContext.fetch(descriptor) {
+                modelContext.delete(item)
+            }
+        } catch {
+            #if DEBUG
+            print("[ItemStore] SwiftData delete failed: \(error)")
+            #endif
+        }
     }
 }

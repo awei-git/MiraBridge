@@ -10,6 +10,7 @@ public final class BridgeConfig {
     public var debugInfo: String?
     public var profile: MiraProfile?
     public var profiles: [MiraProfile] = []
+    private var discovery: MiraServerDiscovery?
 
     public var isSetup: Bool { bridgeURL != nil }
     public var isProfileSelected: Bool { profile != nil }
@@ -20,8 +21,20 @@ public final class BridgeConfig {
         get { UserDefaults.standard.url(forKey: "mira_server_url") }
         set { UserDefaults.standard.set(newValue, forKey: "mira_server_url") }
     }
-    /// Default: Mac Studio on local network (use IP — .local mDNS unreliable on iOS)
-    public static let defaultServerURL = URL(string: "http://192.168.1.232:8384")!
+    /// During migration, failed API writes can still fall back to iCloud command files.
+    /// Turn this off once API writes + the local pending queue are the primary path.
+    public var apiWriteFallbackToICloud: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "mira_api_write_fallback_icloud") == nil {
+                return false
+            }
+            return UserDefaults.standard.bool(forKey: "mira_api_write_fallback_icloud")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "mira_api_write_fallback_icloud") }
+    }
+    /// Default fallback: Mac local hostname. Bonjour discovery should replace
+    /// this when the `_mira._tcp` service is visible on the LAN.
+    public static let defaultServerURL = URL(string: "https://studio.local:8384")!
 
     // Per-user computed URLs
     private var userDir: URL? {
@@ -42,6 +55,27 @@ public final class BridgeConfig {
     public init() {
         restoreBookmark()
         restoreProfile()
+    }
+
+    public func startServerDiscovery() {
+        if discovery == nil {
+            discovery = MiraServerDiscovery { [weak self] url in
+                guard let self else { return }
+                if self.shouldAdoptDiscoveredServerURL(url) {
+                    self.serverURL = url
+                    self.debugInfo = "Discovered API: \(url.absoluteString)"
+                }
+            }
+        }
+        discovery?.start()
+    }
+
+    private func shouldAdoptDiscoveredServerURL(_ url: URL) -> Bool {
+        guard let current = serverURL else { return true }
+        if current == Self.defaultServerURL { return true }
+        let host = current.host()?.lowercased() ?? ""
+        if host == "mira.local" || host == "192.168.1.232" || current.scheme == "http" { return true }
+        return false
     }
 
     // MARK: - Folder
@@ -186,5 +220,35 @@ public final class BridgeConfig {
         }
         if let hb = heartbeatURL { try? fm.startDownloadingUbiquitousItem(at: hb) }
         if let mf = manifestURL { try? fm.startDownloadingUbiquitousItem(at: mf) }
+    }
+}
+
+private final class MiraServerDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+    private let browser = NetServiceBrowser()
+    private var services: [NetService] = []
+    private let onResolve: (URL) -> Void
+
+    init(onResolve: @escaping (URL) -> Void) {
+        self.onResolve = onResolve
+        super.init()
+        browser.delegate = self
+    }
+
+    func start() {
+        browser.searchForServices(ofType: "_mira._tcp.", inDomain: "local.")
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        services.append(service)
+        service.delegate = self
+        service.resolve(withTimeout: 3)
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        let rawHost = sender.hostName ?? ""
+        let host = rawHost.hasSuffix(".") ? String(rawHost.dropLast()) : rawHost
+        guard !host.isEmpty, sender.port > 0 else { return }
+        guard let url = URL(string: "https://\(host):\(sender.port)") else { return }
+        DispatchQueue.main.async { [onResolve] in onResolve(url) }
     }
 }
