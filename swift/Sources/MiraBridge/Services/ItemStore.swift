@@ -260,7 +260,10 @@ public final class ItemStore {
                 )
                 descriptor.fetchLimit = Self.persistedItemLimit
                 let stored = try context.fetch(descriptor)
-                decoded = stored.compactMap { try? JSONDecoder().decode(MiraItem.self, from: $0.payload) }
+                decoded = stored.compactMap { (row: PersistedMiraItem) -> MiraItem? in
+                    guard let item = try? JSONDecoder().decode(MiraItem.self, from: row.payload) else { return nil }
+                    return Self.listSummary(item)
+                }
             } catch {
                 DispatchQueue.main.async {
                     self?.loadLegacyJSONCacheAsync(completion: completion)
@@ -292,7 +295,10 @@ public final class ItemStore {
             )
             descriptor.fetchLimit = Self.persistedItemLimit
             let stored = try modelContext.fetch(descriptor)
-            let decoded = stored.compactMap { try? JSONDecoder().decode(MiraItem.self, from: $0.payload) }
+            let decoded: [MiraItem] = stored.compactMap { (row: PersistedMiraItem) -> MiraItem? in
+                guard let item = try? JSONDecoder().decode(MiraItem.self, from: row.payload) else { return nil }
+                return Self.listSummary(item)
+            }
             guard !decoded.isEmpty else { return false }
             items = decoded
             rebuildIndex()
@@ -310,7 +316,9 @@ public final class ItemStore {
               let data = try? Data(contentsOf: url),
               let cached = try? JSONDecoder().decode([MiraItem].self, from: data),
               !cached.isEmpty else { return }
-        items = cached
+        items = Array(cached.sorted { $0.date > $1.date }
+            .prefix(Self.persistedItemLimit)
+            .map(Self.listSummary))
         rebuildIndex()
         persistNow()
     }
@@ -325,7 +333,9 @@ public final class ItemStore {
             if let data = try? Data(contentsOf: url),
                let decoded = try? JSONDecoder().decode([MiraItem].self, from: data),
                !decoded.isEmpty {
-                cached = Array(decoded.sorted { $0.date > $1.date }.prefix(Self.persistedItemLimit))
+                cached = Array(decoded.sorted { $0.date > $1.date }
+                    .prefix(Self.persistedItemLimit)
+                    .map(Self.listSummary))
             } else {
                 cached = []
             }
@@ -386,6 +396,16 @@ public final class ItemStore {
                 #endif
             }
         }
+    }
+
+    private static func listSummary(_ item: MiraItem) -> MiraItem {
+        var summary = item
+        if let lastDisplayMessage = item.messages.last(where: { $0.kind != .statusCard }) ?? item.messages.last {
+            summary.messages = [lastDisplayMessage]
+        } else {
+            summary.messages = []
+        }
+        return summary
     }
 
     private func deletePersistedItem(_ id: String) {

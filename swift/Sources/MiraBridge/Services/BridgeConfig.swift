@@ -12,7 +12,9 @@ public final class BridgeConfig {
     public var profiles: [MiraProfile] = []
     private var discovery: MiraServerDiscovery?
 
-    public var isSetup: Bool { bridgeURL != nil }
+    public var isSetup: Bool {
+        bridgeURL != nil || serverURL != nil || UserDefaults.standard.string(forKey: "selected_profile") != nil
+    }
     public var isProfileSelected: Bool { profile != nil }
     public var agentName: String { profile?.agentName ?? "Mira" }
 
@@ -54,10 +56,8 @@ public final class BridgeConfig {
 
     public init() {
         profiles = Self.defaultProfiles
-        restoreBookmark()
         restoreProfile()
-        loadProfilesAsync()
-        ensureDirectoriesAsync()
+        restoreBookmarkAsync()
     }
 
     public func startServerDiscovery() {
@@ -223,6 +223,52 @@ public final class BridgeConfig {
         } catch {
             // Stale bookmark — silently clear, user will re-select folder
             UserDefaults.standard.removeObject(forKey: "bridge_bookmark")
+        }
+    }
+
+    private func restoreBookmarkAsync() {
+        guard let data = UserDefaults.standard.data(forKey: "bridge_bookmark") else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            do {
+                var isStale = false
+                let url = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale)
+                guard url.startAccessingSecurityScopedResource() else { return }
+
+                let newBookmark: Data?
+                if isStale {
+                    newBookmark = try url.bookmarkData(
+                        options: .minimalBookmark,
+                        includingResourceValuesForKeys: nil,
+                        relativeTo: nil
+                    )
+                } else {
+                    newBookmark = nil
+                }
+
+                let actualRoot: URL
+                let actualBridge: URL
+                if url.lastPathComponent == "Mira-Bridge" {
+                    actualBridge = url
+                    actualRoot = url.deletingLastPathComponent()
+                } else {
+                    actualRoot = url
+                    actualBridge = url.appending(path: "Mira-Bridge")
+                }
+
+                DispatchQueue.main.async {
+                    if let newBookmark {
+                        UserDefaults.standard.set(newBookmark, forKey: "bridge_bookmark")
+                    }
+                    self?.rootURL = actualRoot
+                    self?.bridgeURL = actualBridge
+                    self?.loadProfilesAsync()
+                    self?.ensureDirectoriesAsync()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    UserDefaults.standard.removeObject(forKey: "bridge_bookmark")
+                }
+            }
         }
     }
 
