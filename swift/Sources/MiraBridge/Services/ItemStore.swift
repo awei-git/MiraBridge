@@ -25,6 +25,7 @@ public final class ItemStore {
     private var itemsById: [String: Int] = [:]  // id → index in items array
     @ObservationIgnored private var modelContainer: ModelContainer?
     @ObservationIgnored private var modelContext: ModelContext?
+    private static let persistedItemLimit = 120
 
     public init() {
         configureSwiftData()
@@ -246,9 +247,10 @@ public final class ItemStore {
     private func loadFromSwiftData() -> Bool {
         guard let modelContext else { return false }
         do {
-            let descriptor = FetchDescriptor<PersistedMiraItem>(
+            var descriptor = FetchDescriptor<PersistedMiraItem>(
                 sortBy: [SortDescriptor(\.sortTimestamp, order: .reverse)]
             )
+            descriptor.fetchLimit = Self.persistedItemLimit
             let stored = try modelContext.fetch(descriptor)
             let decoded = stored.compactMap { try? JSONDecoder().decode(MiraItem.self, from: $0.payload) }
             guard !decoded.isEmpty else { return false }
@@ -280,7 +282,10 @@ public final class ItemStore {
             var storedById = Dictionary(uniqueKeysWithValues: stored.map { ($0.id, $0) })
             let encoder = JSONEncoder()
 
-            for item in items {
+            let itemsToPersist = Array(items.sorted { $0.date > $1.date }.prefix(Self.persistedItemLimit))
+            let currentIds = Set(itemsToPersist.map(\.id))
+
+            for item in itemsToPersist {
                 let data = try encoder.encode(item)
                 if let existing = storedById.removeValue(forKey: item.id) {
                     existing.updatedAt = item.updatedAt
@@ -296,7 +301,7 @@ public final class ItemStore {
                 }
             }
 
-            for stale in storedById.values {
+            for stale in storedById.values where !currentIds.contains(stale.id) {
                 modelContext.delete(stale)
             }
             try modelContext.save()

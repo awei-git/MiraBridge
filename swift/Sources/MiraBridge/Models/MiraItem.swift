@@ -258,6 +258,16 @@ public struct MiraTasksResponse: Codable {
     }
 }
 
+public struct MiraTaskDetailResponse: Codable {
+    public let item: MiraItem
+    public let serverTime: String?
+
+    enum CodingKeys: String, CodingKey {
+        case item
+        case serverTime = "server_time"
+    }
+}
+
 // MARK: - Commands (iOS → Agent)
 
 public struct MiraCommand: Codable {

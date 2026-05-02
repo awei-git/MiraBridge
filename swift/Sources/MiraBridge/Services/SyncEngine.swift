@@ -26,6 +26,8 @@ public final class SyncEngine {
     private var manifestTimestamps: [String: String] = [:]  // id → updated_at
     private let decoder = JSONDecoder()
     private var metadataQuery: NSMetadataQuery?
+    private static let listSnapshotLimit = 80
+    private static let listMessagesPerItem = 1
 
     public init(config: BridgeConfig, store: ItemStore) {
         self.config = config
@@ -204,7 +206,12 @@ public final class SyncEngine {
         let serverBase = config.serverURL ?? BridgeConfig.defaultServerURL
 
         // --- Preferred: API control-plane task snapshot ---
-        if let snapshot = _fetchJSON(MiraTasksResponse.self, from: serverBase.appending(path: "api/\(userId)/tasks")) {
+        var tasksURL = serverBase.appending(path: "api/\(userId)/tasks")
+        tasksURL.append(queryItems: [
+            URLQueryItem(name: "limit", value: "\(Self.listSnapshotLimit)"),
+            URLQueryItem(name: "messages_per_item", value: "\(Self.listMessagesPerItem)")
+        ])
+        if let snapshot = _fetchJSON(MiraTasksResponse.self, from: tasksURL) {
             var changed: [MiraItem] = []
             var currentIds = Set<String>()
             for item in snapshot.items {
@@ -329,6 +336,23 @@ public final class SyncEngine {
     @MainActor
     private func _refreshFromEventStream() {
         refresh()
+    }
+
+    public func refreshDetail(itemId: String, messagesPerItem: Int = 100) {
+        guard config.isSetup else { return }
+        let userId = config.profile?.id ?? "ang"
+        let serverBase = config.serverURL ?? BridgeConfig.defaultServerURL
+        var detailURL = serverBase.appending(path: "api/\(userId)/tasks/\(itemId)")
+        detailURL.append(queryItems: [
+            URLQueryItem(name: "messages_per_item", value: "\(messagesPerItem)")
+        ])
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            guard let detail = self._fetchJSON(MiraTaskDetailResponse.self, from: detailURL) else { return }
+            DispatchQueue.main.async {
+                self.store.batchUpsert([detail.item])
+            }
+        }
     }
 
     /// Synchronous HTTP fetch with 3s timeout, returns decoded object or nil
