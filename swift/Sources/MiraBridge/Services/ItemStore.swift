@@ -138,7 +138,7 @@ public final class ItemStore {
 
     public func upsert(_ item: MiraItem) {
         if let idx = itemsById[item.id] {
-            items[idx] = item
+            items[idx] = mergedItem(existing: items[idx], incoming: item)
         } else {
             items.append(item)
             itemsById[item.id] = items.count - 1
@@ -154,7 +154,7 @@ public final class ItemStore {
         var index = itemsById
         for item in newItems {
             if let idx = index[item.id] {
-                updated[idx] = item
+                updated[idx] = mergedItem(existing: updated[idx], incoming: item)
             } else {
                 index[item.id] = updated.count
                 updated.append(item)
@@ -184,6 +184,21 @@ public final class ItemStore {
         items[idx].messages.append(message)
         items[idx].updatedAt = message.timestamp
         schedulePersistenceSave()
+    }
+
+    private func mergedItem(existing: MiraItem, incoming: MiraItem) -> MiraItem {
+        guard incoming.messages.count < existing.messages.count else { return incoming }
+        var merged = incoming
+        var seen = Set<String>()
+        var messages: [ItemMessage] = []
+        for message in existing.messages + incoming.messages {
+            if seen.insert(message.id).inserted {
+                messages.append(message)
+            }
+        }
+        messages.sort { $0.date < $1.date }
+        merged.messages = messages
+        return merged
     }
 
     private func rebuildIndex() {
