@@ -34,20 +34,20 @@ public final class ItemStore {
     // MARK: - Computed Views
 
     public var hasActiveItems: Bool {
-        items.contains { $0.isActive }
+        items.contains { $0.isActive && !$0.isInternalLivenessNoise }
     }
 
     public var needsAttention: [MiraItem] {
-        items.filter(\.needsAttention).sorted { $0.date > $1.date }
+        items.filter { $0.needsAttention && !$0.isInternalLivenessNoise }.sorted { $0.date > $1.date }
     }
 
     public var activeRequests: [MiraItem] {
-        items.filter { $0.isActive && $0.type == .request }
+        items.filter { $0.isActive && $0.type == .request && !$0.isInternalLivenessNoise }
             .sorted { $0.date > $1.date }
     }
 
     public var feeds: [MiraItem] {
-        items.filter { $0.type == .feed && $0.status != .archived }
+        items.filter { $0.type == .feed && $0.status != .archived && !$0.isInternalLivenessNoise }
             .sorted { $0.date > $1.date }
     }
 
@@ -57,22 +57,22 @@ public final class ItemStore {
     }
 
     public var discussions: [MiraItem] {
-        items.filter { $0.type == .discussion && $0.status != .archived }
+        items.filter { $0.type == .discussion && $0.status != .archived && !$0.isInternalLivenessNoise }
             .sorted { $0.date > $1.date }
     }
 
     public var pinnedItems: [MiraItem] {
-        items.filter(\.pinned).sorted { $0.date > $1.date }
+        items.filter { $0.pinned && !$0.isInternalLivenessNoise }.sorted { $0.date > $1.date }
     }
 
     public var doneItems: [MiraItem] {
-        items.filter { $0.status == .done }
+        items.filter { $0.status == .done && !$0.isInternalLivenessNoise }
             .sorted { $0.date > $1.date }
     }
 
     /// All non-archived items, sorted by update time
     public var allVisible: [MiraItem] {
-        items.filter { $0.status != .archived }
+        items.filter { $0.status != .archived && !$0.isInternalLivenessNoise }
             .sorted { $0.date > $1.date }
     }
 
@@ -117,6 +117,7 @@ public final class ItemStore {
 
     public func filtered(type: ItemType? = nil, tag: String? = nil, status: ItemStatus? = nil) -> [MiraItem] {
         items.filter { item in
+            if item.isInternalLivenessNoise { return false }
             if item.status == .archived { return false }
             if let t = type, item.type != t { return false }
             if let s = status, item.status != s { return false }
@@ -128,7 +129,8 @@ public final class ItemStore {
     public func search(_ query: String) -> [MiraItem] {
         let q = query.lowercased()
         return items.filter { item in
-            item.title.lowercased().contains(q) ||
+            if item.isInternalLivenessNoise { return false }
+            return item.title.lowercased().contains(q) ||
             item.tags.contains(where: { $0.lowercased().contains(q) }) ||
             item.messages.first?.content.lowercased().contains(q) == true
         }.sorted { $0.date > $1.date }
@@ -137,6 +139,10 @@ public final class ItemStore {
     // MARK: - Mutations
 
     public func upsert(_ item: MiraItem) {
+        if item.isInternalLivenessNoise {
+            remove(item.id)
+            return
+        }
         if let idx = itemsById[item.id] {
             items[idx] = mergedItem(existing: items[idx], incoming: item)
         } else {
@@ -150,9 +156,14 @@ public final class ItemStore {
     /// so @Observable fires a single update instead of one per item.
     public func batchUpsert(_ newItems: [MiraItem]) {
         guard !newItems.isEmpty else { return }
-        var updated = items
-        var index = itemsById
+        let hiddenIds = Set(newItems.filter { $0.isInternalLivenessNoise }.map(\.id))
+        var updated = items.filter { !hiddenIds.contains($0.id) && !$0.isInternalLivenessNoise }
+        var index: [String: Int] = [:]
+        for (i, item) in updated.enumerated() {
+            index[item.id] = i
+        }
         for item in newItems {
+            if item.isInternalLivenessNoise { continue }
             if let idx = index[item.id] {
                 updated[idx] = mergedItem(existing: updated[idx], incoming: item)
             } else {
@@ -277,6 +288,7 @@ public final class ItemStore {
                 let stored = try context.fetch(descriptor)
                 decoded = stored.compactMap { (row: PersistedMiraItem) -> MiraItem? in
                     guard let item = try? JSONDecoder().decode(MiraItem.self, from: row.payload) else { return nil }
+                    if item.isInternalLivenessNoise { return nil }
                     return Self.listSummary(item)
                 }
             } catch {
@@ -312,6 +324,7 @@ public final class ItemStore {
             let stored = try modelContext.fetch(descriptor)
             let decoded: [MiraItem] = stored.compactMap { (row: PersistedMiraItem) -> MiraItem? in
                 guard let item = try? JSONDecoder().decode(MiraItem.self, from: row.payload) else { return nil }
+                if item.isInternalLivenessNoise { return nil }
                 return Self.listSummary(item)
             }
             guard !decoded.isEmpty else { return false }
@@ -332,6 +345,7 @@ public final class ItemStore {
               let cached = try? JSONDecoder().decode([MiraItem].self, from: data),
               !cached.isEmpty else { return }
         items = Array(cached.sorted { $0.date > $1.date }
+            .filter { !$0.isInternalLivenessNoise }
             .prefix(Self.persistedItemLimit)
             .map(Self.listSummary))
         rebuildIndex()
@@ -349,6 +363,7 @@ public final class ItemStore {
                let decoded = try? JSONDecoder().decode([MiraItem].self, from: data),
                !decoded.isEmpty {
                 cached = Array(decoded.sorted { $0.date > $1.date }
+                    .filter { !$0.isInternalLivenessNoise }
                     .prefix(Self.persistedItemLimit)
                     .map(Self.listSummary))
             } else {
@@ -371,7 +386,9 @@ public final class ItemStore {
 
     private func persistNow() {
         guard let modelContainer else { return }
-        let itemsToPersist = Array(items.sorted { $0.date > $1.date }.prefix(Self.persistedItemLimit))
+        let itemsToPersist = Array(items.filter { !$0.isInternalLivenessNoise }
+            .sorted { $0.date > $1.date }
+            .prefix(Self.persistedItemLimit))
         persistSnapshotAsync(itemsToPersist, modelContainer: modelContainer)
     }
 

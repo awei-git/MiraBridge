@@ -299,6 +299,18 @@ extension MiraItem {
         status != .archived
     }
 
+    /// Internal liveness/watchdog records are useful for backend diagnostics,
+    /// but they should not appear as normal Home or thread items.
+    public var isInternalLivenessNoise: Bool {
+        if id.hasPrefix("req_liveness_") || id.hasPrefix("mira_liveness_") || id.hasPrefix("output_stale_") {
+            return true
+        }
+        let tagSet = Set(tags.map { $0.lowercased() })
+        guard tagSet.contains("liveness") else { return false }
+        let lowerTitle = title.lowercased()
+        return tagSet.contains("system") || lowerTitle.contains("stale") || lowerTitle.contains("watchdog")
+    }
+
     public var date: Date {
         ISO8601DateFormatter.flexibleDate(from: updatedAt) ?? .distantPast
     }
