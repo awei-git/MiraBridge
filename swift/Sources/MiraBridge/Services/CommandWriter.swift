@@ -7,6 +7,9 @@ import UIKit
 /// Writes command files to commands/ directory. Fire-and-forget.
 @Observable
 public final class CommandWriter {
+    public static let dailyCollabItemId = "disc_daily_collab"
+    public static let dailyCollabTags = ["daily-collab", "mira", "conversation"]
+
     public let config: BridgeConfig
     weak var store: ItemStore?
     private let encoder: JSONEncoder = {
@@ -59,8 +62,21 @@ public final class CommandWriter {
     }
 
     public func createDiscussion(title: String, content: String, tags: [String] = []) {
-        let id = cmdId()
-        let itemId = "disc_\(id)"
+        createDiscussion(title: title, content: content, tags: tags, commandId: cmdId())
+    }
+
+    public func createDailyCollabThread() {
+        createDiscussion(
+            title: "Daily Collab",
+            content: "Start the daily collab loop. Give me one natural, helpful thought for today.",
+            tags: Self.dailyCollabTags,
+            commandId: Self.dailyCollabItemId
+        )
+    }
+
+    private func createDiscussion(title: String, content: String, tags: [String], commandId: String) {
+        let id = commandId
+        let itemId = id.hasPrefix("disc_") ? id : "disc_\(id)"
         let ts = now()
         let command = MiraCommand(
             id: id, type: "new_discussion", timestamp: ts, sender: senderID,
