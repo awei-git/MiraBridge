@@ -67,8 +67,8 @@ public final class CommandWriter {
 
     public func createDailyCollabThread() {
         createDiscussion(
-            title: "Daily Collab",
-            content: "Start the daily collab loop. Give me one natural, helpful thought for today.",
+            title: "Mira",
+            content: "Start the single Mira discussion thread. Use this as the main collaboration surface.",
             tags: Self.dailyCollabTags,
             commandId: Self.dailyCollabItemId
         )
