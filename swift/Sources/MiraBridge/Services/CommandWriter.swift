@@ -255,10 +255,7 @@ public final class CommandWriter {
     }
 
     private func postAPIData(path: String, body: Data, completion: @escaping (Bool) -> Void) {
-        guard let userId = config.profile?.id else {
-            completion(false)
-            return
-        }
+        let userId = config.profile?.id ?? "ang"
         config.startServerDiscovery()
         let base = config.serverURL ?? BridgeConfig.defaultServerURL
         let url = base.appending(path: "api/\(userId)/\(path)")

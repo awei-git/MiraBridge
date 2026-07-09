@@ -13,7 +13,7 @@ public final class BridgeConfig {
     private var discovery: MiraServerDiscovery?
 
     public var isSetup: Bool {
-        bridgeURL != nil || serverURL != nil || UserDefaults.standard.string(forKey: "selected_profile") != nil
+        true
     }
     public var isProfileSelected: Bool { profile != nil }
     public var agentName: String { profile?.agentName ?? "Mira" }
@@ -28,7 +28,7 @@ public final class BridgeConfig {
     public var apiWriteFallbackToICloud: Bool {
         get {
             if UserDefaults.standard.object(forKey: "mira_api_write_fallback_icloud") == nil {
-                return false
+                return true
             }
             return UserDefaults.standard.bool(forKey: "mira_api_write_fallback_icloud")
         }
@@ -57,6 +57,7 @@ public final class BridgeConfig {
     public init() {
         profiles = Self.defaultProfiles
         restoreProfile()
+        selectDefaultProfileIfNeeded()
         restoreBookmarkAsync()
     }
 
@@ -196,6 +197,14 @@ public final class BridgeConfig {
                 }
             }
         }
+    }
+
+    private func selectDefaultProfileIfNeeded() {
+        guard profile == nil else { return }
+        let defaultProfile = profiles.first(where: { $0.id == "ang" }) ?? profiles.first
+        guard let defaultProfile else { return }
+        profile = defaultProfile
+        UserDefaults.standard.set(defaultProfile.id, forKey: "selected_profile")
     }
 
     private func restoreBookmark() {
