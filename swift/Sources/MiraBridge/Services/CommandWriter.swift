@@ -173,10 +173,19 @@ public final class CommandWriter {
         let request = queue.removeFirst()
         postAPIData(path: request.path, body: request.body) { [weak self] ok in
             guard let self else { return }
+            let delivered: Bool
             if ok {
-                self.savePendingAPIRequests(queue)
-                self.flushPendingAPIQueue()
+                delivered = true
+            } else if self.config.apiWriteFallbackToICloud,
+                      let fallbackData = request.fallbackCommand,
+                      let command = try? JSONDecoder().decode(MiraCommand.self, from: fallbackData) {
+                delivered = self.write(command)
+            } else {
+                delivered = false
             }
+            guard delivered else { return }
+            self.savePendingAPIRequests(queue)
+            self.flushPendingAPIQueue()
         }
     }
 
@@ -210,6 +219,7 @@ public final class CommandWriter {
         let id: String
         let path: String
         let body: Data
+        let fallbackCommand: Data?
         let createdAt: String
     }
 
@@ -243,11 +253,12 @@ public final class CommandWriter {
             postAPIData(path: path, body: body) { [weak self] ok in
                 guard let self else { return }
                 if ok { return }
-                if self.config.apiWriteFallbackToICloud {
-                    self.write(command)
-                } else {
-                    self.enqueuePendingAPIRequest(path: path, body: body, id: command.id)
+                if self.config.apiWriteFallbackToICloud && self.write(command) {
+                    return
                 }
+                // Never silently discard a user command when the bookmark is
+                // missing, stale, or temporarily unwritable.
+                self.enqueuePendingAPIRequest(path: path, body: body, fallback: command)
             }
         } catch {
             write(command)
@@ -270,13 +281,19 @@ public final class CommandWriter {
         }.resume()
     }
 
-    private func enqueuePendingAPIRequest(path: String, body: Data, id: String) {
+    private func enqueuePendingAPIRequest(path: String, body: Data, fallback command: MiraCommand) {
         var queue = loadPendingAPIRequests()
-        if queue.contains(where: { $0.id == id }) { return }
-        queue.append(PendingAPIRequest(id: id, path: path, body: body, createdAt: now()))
+        if queue.contains(where: { $0.id == command.id }) { return }
+        queue.append(PendingAPIRequest(
+            id: command.id,
+            path: path,
+            body: body,
+            fallbackCommand: try? encoder.encode(command),
+            createdAt: now()
+        ))
         savePendingAPIRequests(queue)
         DispatchQueue.main.async { [weak self] in
-            self?.pendingIds.insert(id)
+            self?.pendingIds.insert(command.id)
         }
     }
 
@@ -298,8 +315,9 @@ public final class CommandWriter {
         }
     }
 
-    private func write(_ command: MiraCommand) {
-        guard let dir = config.commandsDir else { return }
+    @discardableResult
+    private func write(_ command: MiraCommand) -> Bool {
+        guard let dir = config.commandsDir else { return false }
         let ts = Self.dateStamp()
         let filename = "cmd_\(ts)_\(command.id).json"
         let url = dir.appending(path: filename)
@@ -309,7 +327,10 @@ public final class CommandWriter {
             DispatchQueue.main.async { [weak self] in
                 self?.pendingIds.insert(command.id)
             }
-        } catch { }
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func cmdId() -> String {

@@ -13,7 +13,7 @@ public final class BridgeConfig {
     private var discovery: MiraServerDiscovery?
 
     public var isSetup: Bool {
-        true
+        bridgeURL != nil && rootURL != nil
     }
     public var isProfileSelected: Bool { profile != nil }
     public var agentName: String { profile?.agentName ?? "Mira" }
